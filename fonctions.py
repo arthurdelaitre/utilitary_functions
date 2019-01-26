@@ -6,7 +6,7 @@ Created on Sat Jan 26 11:22:53 2019
 """
 import pandas as pd
 import numpy as np
-import matplotlib as plt
+from matplotlib import pyplot as plt
 
 def missing_values_table(df):
     """Creates a recap of missing values per columns"""
