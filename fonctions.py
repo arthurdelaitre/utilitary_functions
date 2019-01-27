@@ -7,6 +7,7 @@ Created on Sat Jan 26 11:22:53 2019
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
+from sklearn.model_selection import train_test_split
 
 def missing_values_table(df):
     """Creates a recap of missing values per columns"""
@@ -73,3 +74,93 @@ def plot_correlated_pairs(df,threshold = 0.5,saving_path = None):
     if saving_path is not None:
         plt.savefig(saving_path)
     plt.show()
+
+def distinct_families(df):
+    """Gives the different second level headers of a dataframe"""
+    families = []
+    for col in df.columns:
+        if col[1] not in families:
+            families.append(col[1])
+    return np.array(families)
+
+def select_from_family(df,family):
+    """Selects columns matching the second level header given"""
+    cols = []
+    for col in df.columns:
+        if col[1] == family:
+            cols.append(col)
+    return df[cols]
+
+def create_polynomial_rows(df,order):
+    """Creates a DataFrame with new columns containing polynomial values of the other columns with respect to the order"""
+    columns = df.columns
+    new_columns = list(columns)
+    i=0
+    for col in columns:
+        i+=1
+        col_name = None
+        if hasattr(col,'__len__'):
+            col_name = [str(col[0])+"**"+str(order),col[1]]
+        else:
+            col_name = str(col)+"**"+str(order)
+        new_columns.append(col_name)
+        df[str(i)] = df[col]**order
+    df.columns=pd.MultiIndex.from_arrays(np.transpose(np.array(new_columns)),names=['col','family'])
+    return df
+
+def reconstruct_with_model(df,cols_to_predict,model,cols_to_ignore=None,return_score=False):
+    """Reconstructs the nans of cols_to_predict by training a model on the dataframe containing the necessary informations."""
+    df_nonan = df.loc[list(df[cols_to_predict].dropna(axis=0).index)]
+    df_nan = df.drop(index=df[cols_to_predict].dropna(axis=0).index)
+    
+    df_nan_X = df_nan.drop(cols_to_predict,axis=1)
+    if cols_to_ignore is not None:
+        df_nonan_wocols = df_nonan.drop(cols_to_ignore,axis=1)
+        df_nan_wocols = df_nan_X.drop(cols_to_ignore,axis=1)
+    else:
+        df_nonan_wocols = df_nonan
+        df_nan_wocols = df_nan_X
+    df_nonan_wonan = df_nonan_wocols.dropna(axis=0)
+    df_nonan_y = df_nonan_wonan[cols_to_predict]
+    df_nonan_X = df_nonan_wonan.drop(cols_to_predict,axis=1)
+    
+    
+    #Eval the model
+    X_train, X_test, y_train, y_test = train_test_split(df_nonan_X, df_nonan_y, test_size=0.20)
+    model.fit(X_train,y_train)
+    score = model.score(X_test,y_test)
+    print("Score obtained on a test set : "+str(score))
+    
+    #Train the model on full dataset
+    model.fit(df_nonan_X,df_nonan_y)
+    df_pred_y=pd.DataFrame(model.predict(df_nan_wocols),index=df_nan_X.index)
+    df_pred_y.columns=pd.MultiIndex.from_arrays(np.transpose(np.array(list(cols_to_predict))),names=['col','family'])
+    df_nan = pd.concat([df_nan_X,df_pred_y],axis=1)
+    df_final = pd.concat([df_nonan,df_nan])
+    
+    if return_score:
+        return df_final.sort_index(),score
+    return df_final.sort_index()
+
+def reconstruct_line(df,lines,model):
+    """Reconstructs some lines of df using a model trained on all df-lines"""
+    df_train = df.loc[df.index.difference(pd.Index(lines))]
+    new_lines=[]
+    for line in lines:
+        line_data = df.loc[[line]]
+        if line_data.isnull().any().any():
+            df_2 = pd.concat([df_train,line_data])
+            df_2 =reconstruct_with_model(df_2,df_2.columns[np.where(line_data.isnull())[1]],model)
+            new_lines.append(df_2.loc[[line]])
+    new_lines.append(df_train)
+    df_final = pd.concat(new_lines)
+    return df_final.sort_index()
+
+def reconstruct_line_with_nonan(df,lines,model):
+    """Reconstructs sone lines of df using a model trained on clean data of the df (Samples with no nans)"""
+    df_1 = df.dropna(axis=0)
+    df_2 = df.loc[lines]
+    df_full = pd.concat([df_1,df_2])
+    reconstruct = reconstruct_line(df_full,lines,model)
+    df_final=pd.concat([reconstruct,df.loc[(df.index.difference(df_1.index))&(df.index.difference(df_2.index))]])
+    return df_final.sort_index()
