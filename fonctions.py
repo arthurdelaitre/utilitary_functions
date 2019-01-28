@@ -164,3 +164,50 @@ def reconstruct_line_with_nonan(df,lines,model):
     reconstruct = reconstruct_line(df_full,lines,model)
     df_final=pd.concat([reconstruct,df.loc[(df.index.difference(df_1.index))&(df.index.difference(df_2.index))]])
     return df_final.sort_index()
+
+def plot_importance(importances,labels,sort=True,n_plot=None):
+    if sort:
+        arr = np.transpose(np.array([importances,labels]))
+        sorted_arr = sorted(arr,key=lambda arr : arr[0])
+        new_arr = np.transpose(sorted_arr)
+        importances = new_arr[0]
+        labels = new_arr[1]
+    if n_plot is None:
+        n_plot = len(importances)
+    plt.figure(figsize=(10,n_plot/2))
+    plt.barh(range(n_plot),importances)
+    plt.yticks(range(n_plot),labels)
+    
+def plot_kde_corrected(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False):
+    a=1
+    """Plot the corrected distributions of the two dataframes. The correction is col = col/(abs(col)+1)**0.5 ."""
+    if sorted_cols in None:
+        sorted_cols=range(len(df_X.columns))
+    for i in sorted_cols:
+
+        plt.figure(figsize=(20,5))
+        (df_X_submission[df_X_submission.columns[i]]/(np.abs(df_X_submission[df_X_submission.columns[i]]).add(1)**0.5)).plot.kde(kde_coef,xlim=(-3,3),label="test")
+        (df_X[df_X.columns[i]]/(np.abs(df_X[df_X.columns[i]]).add(1)**0.5)).plot.kde(kde_coef,xlim=(-3,3),label="train")
+        plt.title(labels[0][i]+' - Rang d\'importance : '+str(a))
+        plt.legend()
+        if save:
+            plt.savefig('distribs/distributions_'+str(a)+'_var_'+str(i)+'.pdf')
+        a+=1
+
+def plot_central_kde(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False):
+    """Plot the distributions of the two dataframes, centered and in the limits -3;+3 ."""
+    a=1
+    if sorted_cols is None:
+        sorted_cols=range(len(df_X.columns))
+    for i in sorted_cols:
+
+        plt.figure(figsize=(20,5))
+        col = df_X_submission.columns[i]
+        df_X_submission[col][np.abs(df_X_submission[col])<3].plot.kde(kde_coef,xlim=(-3,3),label="test")
+        col = df_X.columns[i]
+        df_X[col][np.abs(df_X[col])<3].plot.kde(kde_coef,xlim=(-3,3),label="train")
+        plt.title(labels[0][i]+' - Rang d\'importance : '+str(a))
+        plt.legend()
+        if save:
+            plt.savefig('distribs/distributions_central_'+str(a)+'_var_'+str(i)+'.pdf')
+        a+=1
