@@ -8,6 +8,9 @@ import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
 from sklearn.model_selection import train_test_split
+from scipy.integrate import simps
+from sklearn.model_selection import cross_val_score
+import tqdm
 
 def missing_values_table(df):
     """Creates a recap of missing values per columns"""
@@ -178,36 +181,151 @@ def plot_importance(importances,labels,sort=True,n_plot=None):
     plt.barh(range(n_plot),importances)
     plt.yticks(range(n_plot),labels)
     
-def plot_kde_corrected(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False):
-    a=1
+def plot_kde_corrected(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False,labels=None):
     """Plot the corrected distributions of the two dataframes. The correction is col = col/(abs(col)+1)**0.5 ."""
+    a=1
+    if labels is None:
+        labels=sorted_cols
     if sorted_cols in None:
         sorted_cols=range(len(df_X.columns))
-    for i in sorted_cols:
+    for i in range(len(sorted_cols)):
 
         plt.figure(figsize=(20,5))
         (df_X_submission[df_X_submission.columns[i]]/(np.abs(df_X_submission[df_X_submission.columns[i]]).add(1)**0.5)).plot.kde(kde_coef,xlim=(-3,3),label="test")
         (df_X[df_X.columns[i]]/(np.abs(df_X[df_X.columns[i]]).add(1)**0.5)).plot.kde(kde_coef,xlim=(-3,3),label="train")
-        plt.title(labels[0][i]+' - Rang d\'importance : '+str(a))
+        plt.title(str(labels[i])+' - Rang d\'importance : '+str(a))
         plt.legend()
         if save:
             plt.savefig('distribs/distributions_'+str(a)+'_var_'+str(i)+'.pdf')
         a+=1
 
-def plot_central_kde(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False):
+def plot_central_kde(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=False,labels=None):
     """Plot the distributions of the two dataframes, centered and in the limits -3;+3 ."""
     a=1
+    
     if sorted_cols is None:
-        sorted_cols=range(len(df_X.columns))
-    for i in sorted_cols:
+        sorted_cols=df_X.columns
+    if labels is None:
+        labels=sorted_cols
+    for i in range(len(sorted_cols)):
 
         plt.figure(figsize=(20,5))
-        col = df_X_submission.columns[i]
+        col = sorted_cols[i]
         df_X_submission[col][np.abs(df_X_submission[col])<3].plot.kde(kde_coef,xlim=(-3,3),label="test")
-        col = df_X.columns[i]
+        col = sorted_cols[i]
         df_X[col][np.abs(df_X[col])<3].plot.kde(kde_coef,xlim=(-3,3),label="train")
-        plt.title(labels[0][i]+' - Rang d\'importance : '+str(a))
+        plt.title(str(labels[i])+' - Rang d\'importance : '+str(a))
         plt.legend()
         if save:
             plt.savefig('distribs/distributions_central_'+str(a)+'_var_'+str(i)+'.pdf')
         a+=1
+
+def fix_distrib(first_distrib,second_distrib,limits=(-3,3)):
+    eval_points = np.arange(limits[0],limits[1],0.001)
+    full = pd.concat([first_distrib,second_distrib],axis=1)
+    first_kde = first_distrib[np.abs(first_distrib)<3].plot.kde(0.01,ind=eval_points)
+    second_kde = second_distrib[np.abs(second_distrib)<3].plot.kde(0.01,ind=eval_points)
+    #kdes = full.plot.kde(0.01,ind=eval_points)
+    line_1 = first_kde.lines[0]
+    line_2 = second_kde.lines[-1]
+    data_1 = line_1.get_ydata()
+    data_2 = line_2.get_ydata()
+    area_product = simps(data_2)*simps(data_1)
+    
+    conv = np.convolve(data_1,np.flip(data_2,axis=0),mode='same')
+    area_conv = simps(conv)
+    ind_max = np.argmax(conv)
+    first_distrib_copy = first_distrib.copy() - eval_points[ind_max]
+    
+    squared_precision_ratio = area_conv/area_product
+    
+    return first_distrib_copy,squared_precision_ratio
+
+def transform_ratios(ratios):
+    ratios = [(elt-min(ratios))/(max(ratios)-min(ratios)) for elt in ratios]
+    ratios = [elt**6 for elt in ratios]
+
+    return ratios
+
+def compute_best_feature(improvements,ratios):
+    score = [(improvements[k]**0.7)*ratios[k] for k in range(len(improvements))]
+    ind = np.argmax(score)
+    return ind,score[ind]
+
+def compute_distrib_ratios(df_1,df_2,columns=None,transform_=True):
+    if columns is None:
+        columns=df_1.columns
+    new_df_1 = df_1.copy()
+    ratios = []
+    for col in tqdm.tqdm(columns):
+        new_col,ratio = fix_distrib(df_1[col],df_2[col])
+        ratios.append(ratio)
+        new_df_1[col] = new_col
+    
+    if transform_:
+        ratios = transform_ratios(ratios)
+        
+    return new_df_1,ratios
+
+def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.008):
+    columns_selected = base_columns
+    print("Calcul des ratios de distribution")
+    new_df_train, distrib_ratios = compute_distrib_ratios(df_train,df_2)
+    boucle = True
+    while boucle:
+        print("Choix de la colonne à ajouter")
+        improvements = improvements_made_by_features(list_models,new_df_train,df_labels,columns_selected,scoring='accuracy')
+        ind_best, score = compute_best_feature(improvements,distrib_ratios)
+        if score > thresh :
+            columns_selected.append(df_train.columns[ind_best])
+            print("Colonne "+str(df_train.columns[ind_best])+" ajoutée")
+        else :
+            boucle = False
+    return new_df_train,columns_selected
+
+def plot_importance(importances,labels,sort=True,n_plot=None):
+    if sort:
+        arr = np.transpose(np.array([importances,labels]))
+        sorted_arr = sorted(arr,key=lambda arr : arr[0])
+        new_arr = np.transpose(sorted_arr)
+        importances = new_arr[0]
+        labels = new_arr[1]
+    if n_plot is None:
+        n_plot = len(importances)
+    plt.figure(figsize=(10,n_plot/2))
+    plt.barh(range(n_plot),importances)
+    plt.yticks(range(n_plot),labels)
+    
+
+
+def cv_score(model,df_train,df_label,scoring):
+    """Use the model to predict on the df_test."""
+    return np.mean(cross_val_score(model,df_train,df_label,cv=5,scoring=scoring))
+
+def diff_cv_score(model,df_train_first,df_train_second,df_label,scoring):
+    """Return the improvement made with df_train_second compared to df_train_first"""
+    score = cv_score(model,df_train_second,df_label,scoring) - cv_score(model,df_train_first,df_label,scoring)
+    return score
+
+def improvements_made_by_features(list_models,df_train,df_label,base_columns,scoring,use_tqdm=False,verbose=True):
+    """Return the improvement in accuracy made by adding the features to the dataset."""
+    improvements=[]
+    base_scores = []
+    for model in list_models:
+        score = cv_score(model,df_train[base_columns],df_label,scoring)
+        base_scores.append(score)
+    base_score = np.mean(base_scores)
+    if verbose:
+        print("Score avant sélection d'une nouvelle variable : "+str(base_score))
+    for col in tqdm.tqdm(df_train.columns):
+        if col in base_columns:
+            improvements.append(0)
+        else:
+            cv_scores = []
+            new_cols = list(base_columns).copy()
+            new_cols.append(col)
+            for model in list_models:
+                diff_score = cv_score(model,df_train[new_cols],df_label,scoring) - base_score
+                cv_scores.append(diff_score)
+            improvements.append(np.mean(cv_scores))
+    return improvements
