@@ -11,6 +11,8 @@ from sklearn.model_selection import train_test_split
 from scipy.integrate import simps
 from sklearn.model_selection import cross_val_score
 import tqdm
+import xgboost as xgb
+from sklearn.metrics import auc,accuracy_score,fbeta_score
 
 def missing_values_table(df):
     """Creates a recap of missing values per columns"""
@@ -220,35 +222,44 @@ def plot_central_kde(df_X,df_X_submission,sorted_cols=None,kde_coef = 0.01,save=
             plt.savefig('distribs/distributions_central_'+str(a)+'_var_'+str(i)+'.pdf')
         a+=1
 
-def fix_distrib(first_distrib,second_distrib,limits=(-3,3)):
+def fix_distrib(first_distrib,second_distrib,limits=(-3,3),kde_coef=0.01):
     eval_points = np.arange(limits[0],limits[1],0.001)
     full = pd.concat([first_distrib,second_distrib],axis=1)
-    first_kde = first_distrib[np.abs(first_distrib)<3].plot.kde(0.01,ind=eval_points)
-    second_kde = second_distrib[np.abs(second_distrib)<3].plot.kde(0.01,ind=eval_points)
+    plt.figure(figsize=(20,5))
+    first_kde = first_distrib[np.abs(first_distrib)<3].plot.kde(kde_coef,ind=eval_points)
+    second_kde = second_distrib[np.abs(second_distrib)<3].plot.kde(kde_coef,ind=eval_points)
+    #plt.show()
     #kdes = full.plot.kde(0.01,ind=eval_points)
-    line_1 = first_kde.lines[0]
+    line_1 = first_kde.lines[-1]
     line_2 = second_kde.lines[-1]
     data_1 = line_1.get_ydata()
     data_2 = line_2.get_ydata()
-    area_product = simps(data_2)*simps(data_1)
+    
+    area_sum = simps(data_2)+simps(data_1)
     
     conv = np.convolve(data_1,np.flip(data_2,axis=0),mode='same')
-    area_conv = simps(conv)
+    area_conv = max(conv)
     ind_max = np.argmax(conv)
     first_distrib_copy = first_distrib.copy() - eval_points[ind_max]
     
-    squared_precision_ratio = area_conv/area_product
+    third_kde = first_distrib_copy[np.abs(first_distrib_copy)<3].plot.kde(kde_coef/2,ind=eval_points)
+    line_3 = third_kde.lines[-1]
+    data_3 = line_3.get_ydata()
+    data_min = [min(data_3[k],data_2[k]) for k in range(len(data_2))]
+    data_max = [max(data_3[k],data_2[k]) for k in range(len(data_2))]
+    iou = simps(data_min)/simps(data_max)
+    ratio = iou
     
-    return first_distrib_copy,squared_precision_ratio
+    return first_distrib_copy,ratio
 
 def transform_ratios(ratios):
-    ratios = [(elt-min(ratios))/(max(ratios)-min(ratios)) for elt in ratios]
-    ratios = [elt**6 for elt in ratios]
-
+    ratios = [(max(0,elt-min(ratios)))/(max(ratios)-min(ratios)) for elt in ratios]
+    ratios = [elt**2 for elt in ratios]
+    #print(ratios)
     return ratios
 
 def compute_best_feature(improvements,ratios):
-    score = [(improvements[k]**0.7)*ratios[k] for k in range(len(improvements))]
+    score = [(max((improvements[k]*1000),1)**0.8-1)*ratios[k]/1000 for k in range(len(improvements))]
     ind = np.argmax(score)
     return ind,score[ind]
 
@@ -258,7 +269,9 @@ def compute_distrib_ratios(df_1,df_2,columns=None,transform_=True):
     new_df_1 = df_1.copy()
     ratios = []
     for col in tqdm.tqdm(columns):
+        
         new_col,ratio = fix_distrib(df_1[col],df_2[col])
+        #print(col,ratio)
         ratios.append(ratio)
         new_df_1[col] = new_col
     
@@ -267,14 +280,16 @@ def compute_distrib_ratios(df_1,df_2,columns=None,transform_=True):
         
     return new_df_1,ratios
 
-def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.008):
+def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.01,ratios=True,scoring='accuracy'):
     columns_selected = base_columns
     print("Calcul des ratios de distribution")
     new_df_train, distrib_ratios = compute_distrib_ratios(df_train,df_2)
+    if not ratios:
+        distrib_ratios = np.ones(len(distrib_ratios))
     boucle = True
     while boucle:
         print("Choix de la colonne à ajouter")
-        improvements = improvements_made_by_features(list_models,new_df_train,df_labels,columns_selected,scoring='accuracy')
+        improvements = improvements_made_by_features(list_models,new_df_train,df_labels,columns_selected,scoring=scoring)
         ind_best, score = compute_best_feature(improvements,distrib_ratios)
         if score > thresh :
             columns_selected.append(df_train.columns[ind_best])
@@ -282,6 +297,14 @@ def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.
         else :
             boucle = False
     return new_df_train,columns_selected
+
+def select_and_modify(df_train,df_y,df_test,base_columns,columns_to_consider,list_models,ratios=True,thresh=0.01,scoring='accuracy'):
+    df_train_sel = df_train[columns_to_consider]
+    df_test_sel = df_test[columns_to_consider]
+    new_df_train,cols_selected = select_features(df_train_sel,df_y,df_test_sel,base_columns=base_columns,list_models=list_models,ratios=ratios,thresh=thresh,scoring=scoring)
+    new_df_train = new_df_train[cols_selected]
+    new_df_test = df_test_sel[cols_selected]
+    return new_df_train,new_df_test
 
 def plot_importance(importances,labels,sort=True,n_plot=None):
     if sort:
@@ -329,3 +352,71 @@ def improvements_made_by_features(list_models,df_train,df_label,base_columns,sco
                 cv_scores.append(diff_score)
             improvements.append(np.mean(cv_scores))
     return improvements
+
+def score_and_pred_of_xgboost(df_train,df_y,params,df_test = None,df_test_y=None,obj=None,n_estimators = 10):
+    dtrain = xgb.DMatrix(df_train, label=df_y)
+    if obj is None:
+        cv = xgb.cv(params,dtrain,nfold=4)
+    else:
+        cv = xgb.cv(params,dtrain,nfold=4,obj=obj)
+    print(cv)
+    x_train,x_test,y_train,y_test = train_test_split(df_train,df_y,test_size = 0.25)
+    d_train = xgb.DMatrix(x_train, label=y_train)
+    d_test = xgb.DMatrix(x_test)
+    if obj is None:
+        bst_1 = xgb.train(params, d_train, n_estimators)
+    else:
+        bst_1 = xgb.train(params, d_train, n_estimators, obj=f2_loss)
+    prediction_1 = bst_1.predict(d_test)
+    plt.hist(prediction_1,bins=100)
+    val_reelle_1 = y_test
+    #print("Area under ROC curve : "+str(auc(val_reelle,prediction)))
+    accs,fbeta_scores=[],[]
+    test_vals = np.arange(0.1,1,0.05)
+    for threshold in test_vals:
+        bin_pred = np.where(prediction_1>threshold,1,0)
+        #print("Threshold : "+str(threshold))
+        acc = accuracy_score(val_reelle_1,bin_pred)
+        #print("Accuracy : "+str(acc))
+        fbeta = fbeta_score(val_reelle_1,bin_pred,2)
+        #print("F2 score : "+ str(fbeta))
+        accs.append(acc)
+        fbeta_scores.append(fbeta)
+    plt.figure()
+    plt.plot(test_vals,accs,label="Accuracy")
+    plt.plot(test_vals,fbeta_scores,label = "f2_score")
+    plt.title("Train - Max f2 : "+str(max(fbeta_scores)))
+    plt.legend()
+    plt.show()
+    
+    if df_test is not None:
+        dtest = xgb.DMatrix(df_test)
+        if obj is None:
+            bst = xgb.train(params, dtrain, n_estimators)
+        else:
+            bst = xgb.train(params, dtrain, n_estimators, obj=f2_loss)
+        prediction = bst.predict(dtest)
+        plt.hist(prediction,bins=100)
+        if df_test_y is None:
+            return prediction
+        else:
+            val_reelle = df_test_y.values.reshape((len(df_test_y),))
+            #print("Area under ROC curve : "+str(auc(val_reelle,prediction)))
+            accs,fbeta_scores=[],[]
+            test_vals = np.arange(0.1,1,0.05)
+            for threshold in test_vals:
+                bin_pred = np.where(prediction>threshold,1,0)
+                #print("Threshold : "+str(threshold))
+                acc = accuracy_score(val_reelle,bin_pred)
+                #print("Accuracy : "+str(acc))
+                fbeta = fbeta_score(val_reelle,bin_pred,2)
+                #print("F2 score : "+ str(fbeta))
+                accs.append(acc)
+                fbeta_scores.append(fbeta)
+            plt.figure()
+            plt.plot(test_vals,accs,label="Accuracy")
+            plt.plot(test_vals,fbeta_scores,label = "f2_score")
+            plt.title("Test - Max f2 : "+str(max(fbeta_scores)))
+            plt.legend()
+            plt.show()
+            return prediction
