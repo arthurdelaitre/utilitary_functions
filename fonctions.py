@@ -305,7 +305,7 @@ def compute_ratios(df_1,df_2,columns=None,transform_=True):
     ratios = []
     for col in tqdm.tqdm(columns):
         
-        _,ratio = distrib_ratio(df_1[col],df_2[col])
+        ratio = distrib_ratio(df_1[col],df_2[col])
         #print(col,ratio)
         ratios.append(ratio)
     
