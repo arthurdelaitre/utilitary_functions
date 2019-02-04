@@ -13,6 +13,7 @@ from sklearn.model_selection import cross_val_score
 import tqdm
 import xgboost as xgb
 from sklearn.metrics import auc,accuracy_score,fbeta_score
+from random import gauss
 
 def missing_values_table(df):
     """Creates a recap of missing values per columns"""
@@ -252,6 +253,24 @@ def fix_distrib(first_distrib,second_distrib,limits=(-3,3),kde_coef=0.01):
     
     return first_distrib_copy,ratio
 
+def distrib_ratio(first_distrib,second_distrib,limits=(-3,3),kde_coef=0.01):
+    eval_points = np.arange(limits[0],limits[1],0.001)
+    first_kde = first_distrib[np.abs(first_distrib)<3].plot.kde(kde_coef,ind=eval_points)
+    second_kde = second_distrib[np.abs(second_distrib)<3].plot.kde(kde_coef,ind=eval_points)
+    #plt.show()
+    #kdes = full.plot.kde(0.01,ind=eval_points)
+    line_1 = first_kde.lines[-1]
+    line_2 = second_kde.lines[-1]
+    data_1 = line_1.get_ydata()
+    data_2 = line_2.get_ydata()
+
+    data_min = [min(data_1[k],data_2[k]) for k in range(len(data_2))]
+    data_max = [max(data_1[k],data_2[k]) for k in range(len(data_2))]
+    iou = simps(data_min)/simps(data_max)
+    ratio = iou
+    
+    return ratio
+
 def transform_ratios(ratios):
     ratios = [(max(0,elt-min(ratios)))/(max(ratios)-min(ratios)) for elt in ratios]
     ratios = [elt**2 for elt in ratios]
@@ -280,12 +299,29 @@ def compute_distrib_ratios(df_1,df_2,columns=None,transform_=True):
         
     return new_df_1,ratios
 
-def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.01,ratios=True,scoring='accuracy'):
+def compute_ratios(df_1,df_2,columns=None,transform_=True):
+    if columns is None:
+        columns=df_1.columns
+    ratios = []
+    for col in tqdm.tqdm(columns):
+        
+        _,ratio = distrib_ratio(df_1[col],df_2[col])
+        #print(col,ratio)
+        ratios.append(ratio)
+    
+    if transform_:
+        ratios = transform_ratios(ratios)
+        
+    return ratios
+
+def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.01,ratios=True,decal=True,scoring='accuracy'):
     columns_selected = base_columns
     print("Calcul des ratios de distribution")
     new_df_train, distrib_ratios = compute_distrib_ratios(df_train,df_2)
     if not ratios:
         distrib_ratios = np.ones(len(distrib_ratios))
+    if not decal:
+        new_df_train = df_train
     boucle = True
     while boucle:
         print("Choix de la colonne à ajouter")
@@ -298,10 +334,10 @@ def select_features(df_train,df_labels,df_2,base_columns,list_models,thresh = 0.
             boucle = False
     return new_df_train,columns_selected
 
-def select_and_modify(df_train,df_y,df_test,base_columns,columns_to_consider,list_models,ratios=True,thresh=0.01,scoring='accuracy'):
+def select_and_modify(df_train,df_y,df_test,base_columns,columns_to_consider,list_models,ratios=True,decal=True,thresh=0.01,scoring='accuracy'):
     df_train_sel = df_train[columns_to_consider]
     df_test_sel = df_test[columns_to_consider]
-    new_df_train,cols_selected = select_features(df_train_sel,df_y,df_test_sel,base_columns=base_columns,list_models=list_models,ratios=ratios,thresh=thresh,scoring=scoring)
+    new_df_train,cols_selected = select_features(df_train_sel,df_y,df_test_sel,base_columns=base_columns,list_models=list_models,ratios=ratios,thresh=thresh,scoring=scoring,decal=decal)
     new_df_train = new_df_train[cols_selected]
     new_df_test = df_test_sel[cols_selected]
     return new_df_train,new_df_test
@@ -367,12 +403,14 @@ def score_and_pred_of_xgboost(df_train,df_y,params,df_test = None,df_test_y=None
         bst_1 = xgb.train(params, d_train, n_estimators)
     else:
         bst_1 = xgb.train(params, d_train, n_estimators, obj=f2_loss)
+    
     prediction_1 = bst_1.predict(d_test)
+    
     plt.hist(prediction_1,bins=100)
     val_reelle_1 = y_test
     #print("Area under ROC curve : "+str(auc(val_reelle,prediction)))
     accs,fbeta_scores=[],[]
-    test_vals = np.arange(0.1,1,0.05)
+    test_vals = np.arange(-0.1,1.1,0.03)
     for threshold in test_vals:
         bin_pred = np.where(prediction_1>threshold,1,0)
         #print("Threshold : "+str(threshold))
@@ -396,14 +434,16 @@ def score_and_pred_of_xgboost(df_train,df_y,params,df_test = None,df_test_y=None
         else:
             bst = xgb.train(params, dtrain, n_estimators, obj=f2_loss)
         prediction = bst.predict(dtest)
+        print(bst.get_fscore())
         plt.hist(prediction,bins=100)
         if df_test_y is None:
+            plt.show()
             return prediction
         else:
             val_reelle = df_test_y.values.reshape((len(df_test_y),))
             #print("Area under ROC curve : "+str(auc(val_reelle,prediction)))
             accs,fbeta_scores=[],[]
-            test_vals = np.arange(0.1,1,0.05)
+            test_vals = np.arange(-0.1,1.1,0.03)
             for threshold in test_vals:
                 bin_pred = np.where(prediction>threshold,1,0)
                 #print("Threshold : "+str(threshold))
@@ -420,3 +460,40 @@ def score_and_pred_of_xgboost(df_train,df_y,params,df_test = None,df_test_y=None
             plt.legend()
             plt.show()
             return prediction
+        
+def decalage_mediane(df_1,df_2):
+    medians_df_1 = df_1.median().values
+    medians_df_2 = df_2.median().values
+    new_df_2 = df_2.copy()
+    cols = df_1.columns
+    for i in range(len(cols)):
+        new_df_2[cols[i]] = df_2[cols[i]] - medians_df_2[i] + medians_df_1[i]
+    
+    return df_2
+
+def normal_quantiles(df_1,df_2,cut=0.25):
+    new_df_2 = decalage_mediane(df_1,df_2)
+    
+    medians_df_1 = df_1.median().values
+    q25_df_1 = df_1.quantile(q=cut).values
+    q75_df_1 = df_1.quantile(q=1-cut).values
+
+    medians_new_df_2 = new_df_2.median().values
+    q25_new_df_2 = new_df_2.quantile(q=cut).values
+    q75_new_df_2 = new_df_2.quantile(q=1-cut).values
+    
+    cols = df_1.columns
+    for i in range(len(cols)):
+        col_for_sup = q75_df_1[i]-(q75_df_1[i]-medians_df_1[i])*(q75_new_df_2[i]-new_df_2[cols[i]])/(q75_new_df_2[i]-medians_new_df_2[i])
+        col_for_inf = medians_df_1[i]-(q25_df_1[i]-medians_df_1[i])*(medians_new_df_2[i]-new_df_2[cols[i]])/(q25_new_df_2[i]-medians_new_df_2[i])
+        new_df_2[cols[i]] = np.where(new_df_2[cols[i]]>medians_new_df_2[i],col_for_sup,col_for_inf)
+    
+    return new_df_2
+
+def add_gaussian_noise(df,sigma):
+    new_df = df.copy()
+    n = len(df)
+    cols = df.columns
+    for col in cols:
+        new_df[col] = df[col]+[gauss(0,sigma) for k in range(n)]
+    return new_df
